@@ -1,0 +1,159 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: foreveryoungtours-app
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ../uploads:/var/www/html/uploads
+      - ../storage:/var/www/html/storage
+      - app_logs:/var/log
+    environment:
+      - DB_HOST=db
+      - DB_NAME=forever_young_tours
+      - DB_USER=root
+      - DB_PASS=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - db
+      - redis
+    networks:
+      - foreveryoungtours
+
+  db:
+    image: mysql:8.0
+    container_name: foreveryoungtours-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: forever_young_tours
+      MYSQL_USER: app_user
+      MYSQL_PASSWORD: ${DB_USER_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ../database/production_schema.sql:/docker-entrypoint-initdb.d/02-production.sql
+      - ./mysql.cnf:/etc/mysql/conf.d/custom.cnf
+    ports:
+      - "3306:3306"
+    command: --default-authentication-plugin=mysql_native_password
+    networks:
+      - foreveryoungtours
+
+  redis:
+    image: redis:7-alpine
+    container_name: foreveryoungtours-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - foreveryoungtours
+
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:alpine
+    container_name: foreveryoungtours-proxy
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+    environment:
+      - DEFAULT_HOST=foreveryoungtours.com
+    networks:
+      - foreveryoungtours
+
+  letsencrypt:
+    image: nginxproxy/acme-companion
+    container_name: foreveryoungtours-letsencrypt
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - acme:/etc/acme.sh
+    environment:
+      - DEFAULT_EMAIL=admin@foreveryoungtours.com
+      - NGINX_PROXY_CONTAINER=foreveryoungtours-proxy
+    depends_on:
+      - nginx-proxy
+    networks:
+      - foreveryoungtours
+
+  backup:
+    image: mysql:8.0
+    container_name: foreveryoungtours-backup
+    restart: "no"
+    volumes:
+      - db_data:/var/lib/mysql
+      - backup_data:/backup
+      - ./backup.sh:/backup.sh
+    environment:
+      - DB_HOST=db
+      - DB_NAME=forever_young_tours
+      - DB_USER=root
+      - DB_PASS=${DB_PASSWORD}
+    command: /bin/bash /backup.sh
+    depends_on:
+      - db
+    networks:
+      - foreveryoungtours
+    profiles:
+      - backup
+
+  monitoring:
+    image: prom/prometheus:latest
+    container_name: foreveryoungtours-monitoring
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - foreveryoungtours
+    profiles:
+      - monitoring
+
+volumes:
+  db_data:
+    driver: local
+  redis_data:
+    driver: local
+  app_logs:
+    driver: local
+  backup_data:
+    driver: local
+  certs:
+    driver: local
+  vhost:
+    driver: local
+  html:
+    driver: local
+  acme:
+    driver: local
+  prometheus_data:
+    driver: local
+
+networks:
+  foreveryoungtours:
+    driver: bridge
